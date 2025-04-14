@@ -34,6 +34,22 @@ def load_model(device=None):
     model = model.to(device)
     return model, device
 
+def average_focal_lengths(intrinsics):
+    """Calculate average focal lengths across all intrinsic matrices."""
+    avg_fx = np.mean([intrinsic[0, 0] for intrinsic in intrinsics])
+    avg_fy = np.mean([intrinsic[1, 1] for intrinsic in intrinsics])
+    
+    # Create new intrinsic matrices with averaged focal lengths
+    averaged_intrinsics = []
+    for intrinsic in intrinsics:
+        new_intrinsic = intrinsic.copy()
+        new_intrinsic[0, 0] = avg_fx  # Set fx to average
+        new_intrinsic[1, 1] = avg_fy  # Set fy to average
+        averaged_intrinsics.append(new_intrinsic)
+    
+    print(f"Averaged focal lengths: fx={avg_fx:.2f}, fy={avg_fy:.2f}")
+    return np.array(averaged_intrinsics)
+
 def process_images(image_dir, model, device):
     """Process images with VGGT and return predictions."""
     image_names = glob.glob(os.path.join(image_dir, "*"))
@@ -181,7 +197,7 @@ def run_skyseg(onnx_session, input_size, image):
     return onnx_result
 
 def filter_and_prepare_points(predictions, conf_threshold, mask_sky=False, mask_black_bg=False, 
-                             mask_white_bg=False, stride=1, prediction_mode="Depthmap and Camera Branch"):
+                            mask_white_bg=False, stride=1, prediction_mode="Depthmap and Camera Branch"):
     """
     Filter points based on confidence and prepare for COLMAP format.
     Implementation matches the conventions in the original VGGT code.
@@ -218,7 +234,7 @@ def filter_and_prepare_points(predictions, conf_threshold, mask_sky=False, mask_
         print("Applying sky segmentation mask")
         try:
             import onnxruntime
-         
+        
             with tempfile.TemporaryDirectory() as temp_dir:
                 print(f"Created temporary directory for sky segmentation: {temp_dir}")
                 temp_images_dir = os.path.join(temp_dir, "images")
@@ -232,7 +248,7 @@ def filter_and_prepare_points(predictions, conf_threshold, mask_sky=False, mask_
                     image_list.append(img_path)
                     cv2.imwrite(img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
                 
-           
+        
                 skyseg_path = os.path.join(temp_dir, "skyseg.onnx")
                 if not os.path.exists("skyseg.onnx"): 
                     print("Downloading skyseg.onnx...")
@@ -255,7 +271,7 @@ def filter_and_prepare_points(predictions, conf_threshold, mask_sky=False, mask_
                     for img_path in image_list:
                         mask_path = os.path.join(sky_masks_dir, os.path.basename(img_path))
                         sky_mask = segment_sky(img_path, skyseg_session, mask_path)
-           
+        
                         if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
                             sky_mask = cv2.resize(sky_mask, (W, H))
                         
@@ -403,7 +419,7 @@ def write_colmap_images_txt(file_path, quaternions, translations, image_points2D
         for i in range(len(quaternions)):
             image_id = i + 1 
             camera_id = i + 1  
-          
+        
             qw, qx, qy, qz = quaternions[i]
             tx, ty, tz = translations[i]
             
@@ -519,7 +535,7 @@ def write_colmap_points3D_bin(file_path, points3D):
             # Track: list of (image_id, point2D_idx)
             fid.write(struct.pack('<Q', len(track)))
             for img_id, point2d_idx in track:
-                fid.write(struct.pack('<II', img_id + 1, point2d_idx))
+                fid.write(struct.pack('<II', img_id + 1, point2d_idx + 1)) 
 
 def main():
     parser = argparse.ArgumentParser(description="Convert images to COLMAP format using VGGT")
@@ -542,6 +558,8 @@ def main():
     parser.add_argument("--prediction_mode", type=str, default="Depthmap and Camera Branch",
                         choices=["Depthmap and Camera Branch", "Pointmap Branch"],
                         help="Which prediction branch to use")
+    parser.add_argument("--average_focal_lengths", action="store_true",
+                    help="Average focal lengths across all images before unprojection")
     
     args = parser.parse_args()
     
@@ -550,6 +568,26 @@ def main():
     model, device = load_model()
     
     predictions, image_names = process_images(args.image_dir, model, device)
+
+    if args.average_focal_lengths:
+        print("Averaging focal lengths across all images...")
+        # Create a copy of the original intrinsics for COLMAP output
+        original_intrinsic = predictions["intrinsic"].copy()
+        # Replace intrinsics with averaged version for unprojection
+        averaged_intrinsic = average_focal_lengths(predictions["intrinsic"])
+        
+        # Redo unprojection with averaged focal lengths
+        print("Recomputing 3D points with averaged focal lengths...")
+        world_points = unproject_depth_map_to_point_map(
+            predictions["depth"], 
+            predictions["extrinsic"], 
+            averaged_intrinsic
+        )
+        predictions["world_points_from_depth"] = world_points
+        
+        # Keep both versions of intrinsics
+        predictions["original_intrinsic"] = original_intrinsic
+        predictions["intrinsic"] = averaged_intrinsic
     
     print("Converting camera parameters to COLMAP format...")
     quaternions, translations = extrinsic_to_colmap_format(predictions["extrinsic"])
