@@ -7,6 +7,7 @@
 import torch.nn as nn
 from .dpt_head import DPTHead
 from .track_modules.base_track_predictor import BaseTrackerPredictor
+from typing import List, Dict, Union # Added for type hinting
 
 
 class TrackHead(nn.Module):
@@ -70,12 +71,12 @@ class TrackHead(nn.Module):
 
         self.iters = iters
 
-    def forward(self, aggregated_tokens_list, images, patch_start_idx, query_points=None, iters=None):
+    def forward(self, aggregated_tokens_input: Union[List, Dict], images, patch_start_idx, query_points=None, iters=None):
         """
         Forward pass of the TrackHead.
 
         Args:
-            aggregated_tokens_list (list): List of aggregated tokens from the backbone.
+            aggregated_tokens_input (Union[List, Dict]): List or Dict of aggregated tokens from the backbone.
             images (torch.Tensor): Input images of shape (B, S, C, H, W) where:
                                    B = batch size, S = sequence length.
             patch_start_idx (int): Starting index for patch tokens.
@@ -93,7 +94,7 @@ class TrackHead(nn.Module):
 
         # Extract features from tokens
         # feature_maps has shape (B, S, C, H//2, W//2) due to down_ratio=2
-        feature_maps = self.feature_extractor(aggregated_tokens_list, images, patch_start_idx)
+        feature_maps = self.feature_extractor(aggregated_tokens_input, images, patch_start_idx)
 
         # Use default iterations if not specified
         if iters is None:

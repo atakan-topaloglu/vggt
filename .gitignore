@@ -10,6 +10,11 @@ __pycache__/
 
 # C extensions
 *.so
+LightGlue/
+lego/
+model_tracker_fixed_e20.pt
+new_sandalye/
+scenes/
 
 # Distribution / packaging
 .Python

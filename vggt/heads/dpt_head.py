@@ -9,13 +9,14 @@
 
 
 import os
-from typing import List, Dict, Tuple, Union
+from typing import List, Dict, Tuple, Union, Set
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .head_act import activate_head
 from .utils import create_uv_grid, position_grid_to_embed
+
 
 
 class DPTHead(nn.Module):
@@ -127,7 +128,7 @@ class DPTHead(nn.Module):
 
     def forward(
         self,
-        aggregated_tokens_list: List[torch.Tensor],
+        aggregated_tokens_input: Union[List[torch.Tensor], Dict[int, torch.Tensor]],
         images: torch.Tensor,
         patch_start_idx: int,
         frames_chunk_size: int = 8,
@@ -151,7 +152,7 @@ class DPTHead(nn.Module):
 
         # If frames_chunk_size is not specified or greater than S, process all frames at once
         if frames_chunk_size is None or frames_chunk_size >= S:
-            return self._forward_impl(aggregated_tokens_list, images, patch_start_idx)
+            return self._forward_impl(aggregated_tokens_input, images, patch_start_idx)
 
         # Otherwise, process frames in chunks to manage memory usage
         assert frames_chunk_size > 0
@@ -166,12 +167,12 @@ class DPTHead(nn.Module):
             # Process batch of frames
             if self.feature_only:
                 chunk_output = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+                    aggregated_tokens_input, images, patch_start_idx, frames_start_idx, frames_end_idx
                 )
                 all_preds.append(chunk_output)
             else:
                 chunk_preds, chunk_conf = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+                    aggregated_tokens_input, images, patch_start_idx, frames_start_idx, frames_end_idx
                 )
                 all_preds.append(chunk_preds)
                 all_conf.append(chunk_conf)
@@ -184,7 +185,7 @@ class DPTHead(nn.Module):
 
     def _forward_impl(
         self,
-        aggregated_tokens_list: List[torch.Tensor],
+        aggregated_tokens_input: Union[List[torch.Tensor], Dict[int, torch.Tensor]],
         images: torch.Tensor,
         patch_start_idx: int,
         frames_start_idx: int = None,
@@ -216,7 +217,10 @@ class DPTHead(nn.Module):
         dpt_idx = 0
 
         for layer_idx in self.intermediate_layer_idx:
-            x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
+            if isinstance(aggregated_tokens_input, dict):
+                x = aggregated_tokens_input[layer_idx][:, :, patch_start_idx:]
+            else: # Fallback for list input
+                x = aggregated_tokens_input[layer_idx][:, :, patch_start_idx:]
 
             # Select frames if processing a chunk
             if frames_start_idx is not None and frames_end_idx is not None:
@@ -258,6 +262,9 @@ class DPTHead(nn.Module):
         preds = preds.view(B, S, *preds.shape[1:])
         conf = conf.view(B, S, *conf.shape[1:])
         return preds, conf
+    
+    def get_required_inter_layers(self) -> List[int]:
+        return self.intermediate_layer_idx
 
     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """

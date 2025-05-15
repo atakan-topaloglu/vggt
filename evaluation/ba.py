@@ -31,7 +31,7 @@ def generate_rank_by_dino(
     Returns:
         List of frame indices ranked by their representativeness
     """
-    dino_v2_model = torch.hub.load('facebookresearch/dinov2', model_name)
+    dino_v2_model = torch.hub.load('facebookresearch/dinov2', model_name, trust_repo=True)
     dino_v2_model.eval()
     dino_v2_model = dino_v2_model.to(device)
 
@@ -46,7 +46,7 @@ def generate_rank_by_dino(
         frame_feat = frame_feat["x_norm_patchtokens"]
         frame_feat_norm = F.normalize(frame_feat, p=2, dim=1)
 
-        # Compute the similarity matrix
+        
         frame_feat_norm = frame_feat_norm.permute(1, 0, 2)
         similarity_matrix = torch.bmm(
             frame_feat_norm, frame_feat_norm.transpose(-1, -2)
@@ -61,17 +61,20 @@ def generate_rank_by_dino(
 
     distance_matrix = 100 - similarity_matrix.clone()
 
-    # Ignore self-pairing
+    
     similarity_matrix.fill_diagonal_(-100)
     similarity_sum = similarity_matrix.sum(dim=1)
 
-    # Find the most common frame
+    
     most_common_frame_index = torch.argmax(similarity_sum).item()
 
-    # Conduct FPS sampling starting from the most common frame
+    
     fps_idx = farthest_point_sampling(
         distance_matrix, query_frame_num, most_common_frame_index
     )
+
+    del dino_v2_model, frame_feat, frame_feat_norm, similarity_matrix, distance_matrix
+    torch.cuda.empty_cache()
 
     return fps_idx
 
@@ -93,20 +96,20 @@ def farthest_point_sampling(
     distance_matrix = distance_matrix.clamp(min=0)
     N = distance_matrix.size(0)
 
-    # Initialize with the most common frame
+    
     selected_indices = [most_common_frame_index]
     check_distances = distance_matrix[selected_indices]
 
     while len(selected_indices) < num_samples:
-        # Find the farthest point from the current set of selected points
+        
         farthest_point = torch.argmax(check_distances)
         selected_indices.append(farthest_point.item())
 
         check_distances = distance_matrix[farthest_point]
-        # Mark already selected points to avoid selecting them again
+        
         check_distances[selected_indices] = 0
 
-        # Break if all points have been selected
+        
         if len(selected_indices) == N:
             break
 
@@ -169,19 +172,30 @@ def predict_track(model, images, query_points, dtype=torch.bfloat16, use_tf32_fo
     """
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
-            images = images[None]  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images)
+            images_b = images[None]  # add batch dimension
+            aggregated_tokens_list_full, ps_idx = model.aggregator(images_b)
 
-            if not use_tf32_for_track:
-                track_list, vis_score, conf_score = model.track_head(
-                    aggregated_tokens_list, images, ps_idx, query_points=query_points, iters=iters
-                )
+        required_dpt_layers_indices = set()
+        if model.track_head is not None and model.track_head.feature_extractor is not None:
+            if hasattr(model.track_head.feature_extractor, 'get_required_inter_layers'):
+                required_dpt_layers_indices.update(model.track_head.feature_extractor.get_required_inter_layers())
+        
+        max_depth_idx = len(aggregated_tokens_list_full) - 1
+        selected_tokens_for_dpt = {
+            idx: aggregated_tokens_list_full[idx] 
+            for idx in sorted(list(required_dpt_layers_indices))
+            if idx <= max_depth_idx  # Ensure index is valid
+        }
+        del aggregated_tokens_list_full # Free the full list as its parts are now in selected_tokens_for_dpt
+        torch.cuda.empty_cache()
 
         if use_tf32_for_track:
-            with torch.cuda.amp.autocast(enabled=False):
+             with torch.cuda.amp.autocast(enabled=False):
+                 track_list, vis_score, conf_score = model.track_head(selected_tokens_for_dpt, images_b, ps_idx, query_points=query_points, iters=iters)
+        else: # Use specified dtype via AMP
+            with torch.cuda.amp.autocast(dtype=dtype):
                 track_list, vis_score, conf_score = model.track_head(
-                    aggregated_tokens_list, images, ps_idx, query_points=query_points, iters=iters
-                )
+                    selected_tokens_for_dpt, images_b, ps_idx, query_points=query_points, iters=iters)
 
     pred_track = track_list[-1]
 
@@ -299,62 +313,64 @@ def run_vggt_with_ba(
     device = images.device
     frame_num = images.shape[0]
 
-    # Select representative frames for feature extraction
+    
     query_frame_indexes = generate_rank_by_dino(
         images, query_frame_num, image_size=518,
         model_name="dinov2_vitb14_reg", device=device,
         spatial_similarity=False
     )
 
-    # Add the first image to the front if not already present
+    
     if 0 in query_frame_indexes:
         query_frame_indexes.remove(0)
     query_frame_indexes = [0, *query_frame_indexes]
 
-    # Get initial pose and depth predictions
+    
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
-            predictions = model(images) # TODO: point map head is redundant here, remove it
+            # Only run camera and depth heads for initial BA setup
+            predictions = model(images, heads_to_run=['camera', 'depth'])
 
     with torch.cuda.amp.autocast(dtype=torch.float64):
         extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         pred_extrinsic = extrinsic[0]
         pred_intrinsic = intrinsic[0]
 
-        # Get 3D points from depth map
-        # You can also directly use the point map head to get 3D points, but its performance is slightly worse than the depth map
+        
+        
         depth_map, depth_conf = predictions["depth"][0], predictions["depth_conf"][0]
         world_points = unproject_depth_map_to_point_map(depth_map, pred_extrinsic, pred_intrinsic)
         world_points = torch.from_numpy(world_points).to(device)
         world_points_conf = depth_conf.to(device)
+        
 
     torch.cuda.empty_cache()
 
-    # Lists to store predictions
+    
     pred_tracks = []
     pred_vis_scores = []
     pred_conf_scores = []
     pred_world_points = []
     pred_world_points_conf = []
 
-    # Initialize feature extractors
+    
     extractors = initialize_feature_extractors(max_query_num, det_thres, extractor_method, device)
 
-    # Process each query frame
+    
     for query_index in query_frame_indexes:
         query_image = images[query_index]
         query_points_round = extract_keypoints(query_image, extractors, max_query_num)
 
-        # Reorder images to put query image first
+        
         reorder_index = calculate_index_mappings(query_index, frame_num, device=device)
         reorder_images = switch_tensor_order([images], reorder_index, dim=0)[0]
 
-        # Track points across frames
+        
         reorder_tracks, reorder_vis_score, reorder_conf_score = predict_track(
             model, reorder_images, query_points_round, dtype=dtype, use_tf32_for_track=True, iters=4,
         )
 
-        # Restore original order
+        
         pred_track, pred_vis, pred_score = switch_tensor_order(
             [reorder_tracks, reorder_vis_score, reorder_conf_score], reorder_index, dim=0
         )
@@ -363,7 +379,7 @@ def run_vggt_with_ba(
         pred_vis_scores.append(pred_vis)
         pred_conf_scores.append(pred_score)
 
-        # Get corresponding 3D points
+        
         query_points_round_long = query_points_round.squeeze(0).long()
         query_world_points = world_points[query_index][
             query_points_round_long[:, 1], query_points_round_long[:, 0]
@@ -375,18 +391,22 @@ def run_vggt_with_ba(
         pred_world_points.append(query_world_points)
         pred_world_points_conf.append(query_world_points_conf)
 
-    # Concatenate prediction lists
+
+    del extractors  # Release feature extractors after the loop
+    del world_points, world_points_conf # Release the full 3D point maps
+    torch.cuda.empty_cache()
+    
     pred_tracks = torch.cat(pred_tracks, dim=1)
     pred_vis_scores = torch.cat(pred_vis_scores, dim=1)
     pred_conf_scores = torch.cat(pred_conf_scores, dim=1)
     pred_world_points = torch.cat(pred_world_points, dim=0)
     pred_world_points_conf = torch.cat(pred_world_points_conf, dim=0)
 
-    # Filter points by confidence
+    
     filtered_flag = pred_world_points_conf > 1.5
 
     if filtered_flag.sum() > max_query_num // 2:
-        # Only filter if we have enough high-confidence points
+        
         pred_world_points = pred_world_points[filtered_flag]
         pred_world_points_conf = pred_world_points_conf[filtered_flag]
         pred_tracks = pred_tracks[:, filtered_flag]
@@ -395,12 +415,12 @@ def run_vggt_with_ba(
 
     torch.cuda.empty_cache()
 
-    # Bundle adjustment parameters
+    
     S, _, H, W = images.shape
     image_size = torch.tensor([W, H], dtype=pred_tracks.dtype, device=device)
     masks = torch.logical_and(pred_vis_scores > 0.05, pred_conf_scores > 0.2)
 
-    # Convert to pycolmap format and run bundle adjustment
+    
     reconstruction, valid_track_mask = batch_matrix_to_pycolmap(
         pred_world_points,
         pred_extrinsic,
