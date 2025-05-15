@@ -155,7 +155,7 @@ def switch_tensor_order(tensors, order, dim=1):
     ]
 
 
-def predict_track(model, images, query_points, dtype=torch.bfloat16, use_tf32_for_track=True, iters=4):
+def predict_track(model, images, query_points, dtype=torch.bfloat16, use_tf32_for_track=False, iters=4):
     """
     Predict tracks for query points across frames.
 
