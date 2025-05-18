@@ -343,7 +343,7 @@ def filter_and_prepare_points(predictions, conf_threshold, mask_sky=False, mask_
                 if not np.all(np.isfinite(point3D)):
                     continue
                 
-                point_hash = hash_point(point3D, scale=1000)
+                point_hash = hash_point(point3D, scale=200)
                 
                 if point_hash not in point_indices:
                     point_idx = len(points3D)
@@ -367,7 +367,7 @@ def filter_and_prepare_points(predictions, conf_threshold, mask_sky=False, mask_
     print(f"Prepared {len(points3D)} 3D points with {sum(len(pts) for pts in image_points2D)} observations for COLMAP")
     return points3D, image_points2D
 
-def hash_point(point, scale=1000):
+def hash_point(point, scale=200):
     """Create a hash for a 3D point by quantizing coordinates."""
     quantized = tuple(np.round(point * scale).astype(int))
     return hash(quantized)
