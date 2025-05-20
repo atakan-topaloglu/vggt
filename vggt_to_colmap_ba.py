@@ -374,7 +374,7 @@ def filter_and_prepare_points(predictions, conf_threshold_percent, mask_sky=Fals
             for c_idx in range(0, W, stride): 
                 flat_array_idx = img_idx * H * W + r_idx * W + c_idx
                 
-                if flat_array_idx >= min_len
+                if flat_array_idx >= min_len:
                     continue
                 
                 current_conf = conf_flat[flat_array_idx]
